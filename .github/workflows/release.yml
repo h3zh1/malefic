@@ -65,7 +65,7 @@ jobs:
         run: |
           
           docker run -v "$(pwd):/root/src" --rm -it ghcr.io/chainreactors/${{matrix.target}}:nightly-2023-09-18-latest \
-            cargo build --release -p malefic-mutant --target ${{matrix.target}}  
+            cargo build --release --profile release-lto -p malefic-mutant --target ${{matrix.target}}  
           sudo chmod -R 777 target
           
           target_dir="target/${{matrix.target}}/release"
