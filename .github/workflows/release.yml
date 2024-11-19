@@ -37,7 +37,7 @@ jobs:
           else
             VERSION=${{ inputs.tag_name }}
           fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENVT
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Create release
         id: create_release
