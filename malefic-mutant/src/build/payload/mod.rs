@@ -95,7 +95,7 @@ pub fn build_payload(
         if ollvm_flag.is_ok() {
             std::fs::remove_file(OLLVM_FLGAS)?;
         }
-        let _ = cmd("rustup", ["default", "nightly-2023-09-18"]).run()?;
+        let _ = cmd("rustup", ["default", "nightly-2024-08-16"]).run()?;
         if config.zigbuild {
             args.push("zigbuild");
         } else {
