@@ -1,0 +1,232 @@
+name: generate malefic with zigbuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      remark:
+        description: 'You can write something here, it will appear in the TITLE of `gh run list`, and help u find the artifact easily.'
+        required: false
+        default: ''
+      release:
+        description: 'Release version (default: none, if you want to upload to a GitHub Release, create a release and provide the version).'
+        required: false
+        default: "none"
+      targets:
+        description: 'Target to compile (comma separated, e.g., windows-x64-gnu,windows-x32-gnu)'
+        required: true
+      edition:
+        description: 'Edition'
+        required: false
+        default: 'community'
+      package:
+        description: 'Package'
+        required: true
+        default: 'beacon'
+      malefic_modules_features:
+        description: 'Malefic modules features'
+        required: false
+        default: 'full'
+      malefic_config_yaml:
+        description: 'Malefic config (Base64-encoded content of config.yaml , will be masked in logs)'
+        required: false
+      autorun_yaml:
+        description: 'Autorun config (Base64-encoded content of autorun.yaml , will be masked in logs)'
+        required: false
+
+run-name: ${{ github.event.inputs.remark }}
+
+permissions:
+  contents: write
+
+jobs:
+  set_targets:
+    runs-on: ubuntu-22.04
+    outputs:
+      targets_json: ${{ steps.set_targets.outputs.targets_json }}
+    steps:
+      - name: Set matrix
+        id: set_targets
+        run: |
+          TARGETS="${{ github.event.inputs.targets }}"
+          TARGETS_JSON=$(echo "[\"${TARGETS//,/\",\"}\"]")
+          echo "targets_json=$TARGETS_JSON" >> $GITHUB_OUTPUT
+
+  generate:
+    needs: set_targets
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        target: ${{ fromJson(needs.set_targets.outputs.targets_json) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Judge platform and arch
+        run: |
+          if [[ "${{matrix.target}}" == *"windows"* ]]; then
+            echo "platform=win" >> $GITHUB_ENV
+          elif [[ "${{matrix.target}}" == *"linux"* ]]; then
+            echo "platform=linux" >> $GITHUB_ENV
+          elif [[ "${{matrix.target}}" == *"darwin"* ]]; then
+            echo "platform=darwin" >> $GITHUB_ENV
+          fi
+          
+          if [[ "${{matrix.target}}" == *"x86_64"* ]]; then
+            echo "arch=x64" >> $GITHUB_ENV
+          else
+            echo "arch=x86" >> $GITHUB_ENV
+          fi
+
+      - name: Install Resource
+        run: |
+          wget https://github.com/chainreactors/malefic/releases/latest/download/resources.zip
+          unzip resources.zip -d resources
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2023-09-18
+
+      - name: Add Rust target
+        run: rustup target add ${{matrix.target}}
+
+      - name: Add musl target for malefic-mutant
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.11.0
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
+      - name: Generate cache key for mutant
+        id: mutant_cache_key
+        run: |
+          HASH=$(find malefic-mutant -name "*.rs" -o -name "Cargo.toml" -o -name "Cargo.lock" | sort | xargs cat | sha256sum | cut -d' ' -f1)
+          echo "key=mutant-zig-$HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache malefic-mutant binary
+        id: cache_mutant
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/x86_64-unknown-linux-musl/release/malefic-mutant
+          key: ${{ steps.mutant_cache_key.outputs.key }}
+
+      - name: Build malefic-mutant
+        if: steps.cache_mutant.outputs.cache-hit != 'true'
+        run: |
+          cargo zigbuild -p malefic-mutant --release --target x86_64-unknown-linux-musl
+
+      - name: Setup malefic-mutant
+        run: |
+          mkdir -p target/x86_64-unknown-linux-musl/release/
+          cp target/x86_64-unknown-linux-musl/release/malefic-mutant malefic-mutant-x86_64-unknown-linux-musl
+          chmod +x malefic-mutant-x86_64-unknown-linux-musl
+
+      - name: Generate config.yaml
+        if : ${{ github.event.inputs.malefic_config_yaml != null }}
+        run: |
+          SECRET_CONFIG_YAML_CONTENT=$(jq -r '.inputs.malefic_config_yaml' $GITHUB_EVENT_PATH)
+          echo "::add-mask::$SECRET_CONFIG_YAML_CONTENT"
+          echo "SECRET_CONFIG_YAML_CONTENT=$SECRET_CONFIG_YAML_CONTENT" >> $GITHUB_ENV
+          echo "$SECRET_CONFIG_YAML_CONTENT" | base64 -d > config.yaml
+
+      - name: Generate autorun.yaml
+        if : ${{ github.event.inputs.autorun_yaml != null }}
+        run: |
+          SECRET_AUTORUN_YAML_CONTENT=$(jq -r '.inputs.autorun_yaml' $GITHUB_EVENT_PATH)
+          echo "::add-mask::$SECRET_AUTORUN_YAML_CONTENT"
+          echo "SECRET_AUTORUN_YAML_CONTENT=$SECRET_AUTORUN_YAML_CONTENT" >> $GITHUB_ENV
+          echo "$SECRET_AUTORUN_YAML_CONTENT" | base64 -d > autorun.yaml
+
+      - name: Cache Rust dependencies
+        id: cache_rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-zig-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.target }}-${{ github.event.inputs.package }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-zig-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-zig-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-zig-
+
+      - name: Build(${{ github.event.inputs.package }}, ${{matrix.target}})
+        if : ${{ github.event.inputs.package == 'beacon' }}
+        run: |
+          ./malefic-mutant-x86_64-unknown-linux-musl generate beacon
+          ./malefic-mutant-x86_64-unknown-linux-musl build malefic --target ${{matrix.target}}
+
+      - name: Build(${{ github.event.inputs.package }}, ${{matrix.target}})
+        if : ${{ github.event.inputs.package == 'pulse' }}
+        run: |
+          ./malefic-mutant-x86_64-unknown-linux-musl generate pulse -p $platform -a $arch
+          ./malefic-mutant-x86_64-unknown-linux-musl build pulse --target ${{matrix.target}}
+
+      - name: Build(${{ github.event.inputs.package }}, ${{matrix.target}})
+        if : ${{ github.event.inputs.package == 'bind' }}
+        run: |
+          ./malefic-mutant-x86_64-unknown-linux-musl generate bind
+          ./malefic-mutant-x86_64-unknown-linux-musl build bind --target ${{matrix.target}}
+
+      - name: Build(${{ github.event.inputs.package }}, ${{matrix.target}})
+        if : ${{ github.event.inputs.package == 'prelude' }}
+        run: |
+          ./malefic-mutant-x86_64-unknown-linux-musl generate prelude autorun.yaml
+          ./malefic-mutant-x86_64-unknown-linux-musl build prelude --target ${{matrix.target}}
+
+      - name: Build(${{ github.event.inputs.package }},${{matrix.target}})
+        if : ${{ github.event.inputs.package == '3rd' }}
+        run: |
+          ./malefic-mutant-x86_64-unknown-linux-musl generate modules -m full
+          ./malefic-mutant-x86_64-unknown-linux-musl build 3rd -m ${{ github.event.inputs.malefic_modules_features }} --target ${{matrix.target}}
+
+      - name: Build(${{ github.event.inputs.package }},${{matrix.target}})
+        if : ${{ github.event.inputs.package == 'modules' }}
+        run: |
+          ./malefic-mutant-x86_64-unknown-linux-musl generate modules -m ${{ github.event.inputs.malefic_modules_features }}
+          ./malefic-mutant-x86_64-unknown-linux-musl build modules -m ${{ github.event.inputs.malefic_modules_features }} --target ${{matrix.target}}
+
+      - name: Debug target directory
+        run: |
+          echo "Rust target: ${{matrix.target}}"
+          echo "Platform: $platform"
+          echo "Architecture: $arch"
+          ls -la ./target/ || echo "target directory not found"
+          ls -la ./target/${{matrix.target}}/ || echo "target/${{matrix.target}} directory not found"
+          ls -la ./target/${{matrix.target}}/release/ || echo "target/${{matrix.target}}/release directory not found"
+
+      - name: Move ${{ github.event.inputs.package }} to output
+        run: |
+          mkdir -p output
+          export prefix=./target/${{matrix.target}}/release
+          export suffix=$([ "$platform" = "win" ] && echo ".exe" || echo "")
+
+          if ${{ github.event.inputs.package == 'beacon' }} || ${{ github.event.inputs.package == 'bind' }}; then \
+            mv $prefix/malefic$suffix output/malefic-${{ github.event.inputs.package }}$suffix; \
+          elif ${{ github.event.inputs.package == 'prelude' }}; then \
+            mv $prefix/malefic-prelude$suffix output/malefic-prelude$suffix; \
+          elif ${{ github.event.inputs.package == 'pulse' }}; then \
+            mv $prefix/malefic-pulse$suffix output/malefic-pulse$suffix;
+          elif ${{ github.event.inputs.package == 'modules' }}; then \
+            mv $prefix/malefic_modules.dll output/malefic_modules-${{matrix.target}}.dll; \
+          elif ${{ github.event.inputs.package == '3rd' }}; then \
+            mv $prefix/malefic_3rd.dll output/malefic_3rd-${{matrix.target}}.dll; \
+          fi
+
+      - name: Upload artifact ${{matrix.target}}
+        if: ${{ github.event.inputs.release == 'none' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: malefic-${{matrix.target}}-${{ github.run_id }}
+          path: output/*
+          retention-days: 2

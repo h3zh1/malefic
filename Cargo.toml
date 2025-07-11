@@ -28,7 +28,7 @@ debug-assertions = false
 strip = true
 lto = "fat"
 codegen-units = 16
-incremental = false
+incremental = true
 rustflags = [
     "-Z", "trim-diagnostic-paths",
     "--cfg", "hide_path",
